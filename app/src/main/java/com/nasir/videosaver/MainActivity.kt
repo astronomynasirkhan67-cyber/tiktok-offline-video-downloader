@@ -170,12 +170,15 @@ class MainActivity : Activity() {
         fun actionBtn(t: String, primary: Boolean, w: Float, c: () -> Unit) = Button(this).apply {
             text = t
             styleBtn(this, primary)
+            textSize = 13f
+            maxLines = 1
+            setPadding(dp(4), 0, dp(4), 0)
             setOnClickListener { c() }
             layoutParams = LinearLayout.LayoutParams(0, dp(48), w).apply { setMargins(dp(3), 0, dp(3), 0) }
         }
         scanBtn = actionBtn("Scan Phone", true, 1.3f) { onScanClicked() }
         actions.addView(scanBtn)
-        actions.addView(actionBtn("Choose Folder", false, 1f) { pickFolder() })
+        actions.addView(actionBtn("Pick Folder", false, 1f) { pickFolder() })
         actions.addView(actionBtn("Diagnostics", false, 1f) { withShizuku { showInfo() } })
         content.addView(actions)
 
