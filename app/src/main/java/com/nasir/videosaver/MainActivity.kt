@@ -500,18 +500,26 @@ class MainActivity : Activity() {
         if (v.uri != null) contentResolver.openInputStream(v.uri)
         else svc?.open(v.path)?.let { ParcelFileDescriptor.AutoCloseInputStream(it) }
 
-    private fun thumb(v: Vid): Bitmap? = try {
-        val r = MediaMetadataRetriever()
+    private fun thumb(v: Vid): Bitmap? {
         var pfd: ParcelFileDescriptor? = null
-        if (v.uri != null) r.setDataSource(this, v.uri) else {
-            pfd = svc?.open(v.path) ?: return null
-            r.setDataSource(pfd.fileDescriptor)
+        try {
+            val r = MediaMetadataRetriever()
+            if (v.uri != null) {
+                r.setDataSource(this, v.uri)
+            } else {
+                pfd = svc?.open(v.path)
+                if (pfd == null) return null
+                r.setDataSource(pfd.fileDescriptor)
+            }
+            val bm = r.getFrameAtTime(1_000_000, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+            r.release()
+            return bm?.let { Bitmap.createScaledBitmap(it, 136, 180, true) }
+        } catch (e: Exception) {
+            return null
+        } finally {
+            try { pfd?.close() } catch (e: Exception) { }
         }
-        val bm = r.getFrameAtTime(1_000_000, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
-        r.release()
-        pfd?.close()
-        bm?.let { Bitmap.createScaledBitmap(it, 136, 180, true) }
-    } catch (e: Exception) { null }
+    }
 
     private fun play(v: Vid) {
         toast("Loading video…")
