@@ -8,8 +8,11 @@ import android.content.ContentValues
 import android.content.Intent
 import android.content.ServiceConnection
 import android.content.pm.PackageManager
+import android.content.res.ColorStateList
 import android.graphics.Bitmap
 import android.graphics.Color
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Bundle
@@ -19,23 +22,37 @@ import android.os.Looper
 import android.os.ParcelFileDescriptor
 import android.provider.DocumentsContract
 import android.provider.MediaStore
+import android.text.TextUtils
 import android.util.LruCache
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.ViewOutlineProvider
 import android.widget.*
 import androidx.documentfile.provider.DocumentFile
 import rikka.shizuku.Shizuku
 import java.io.File
 import java.io.InputStream
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import java.util.concurrent.Executors
 
 class MainActivity : Activity() {
 
     class Vid(val key: String, val name: String, val size: Long, val modified: Long, val uri: Uri?, val path: String?)
-    class Holder(val cb: CheckBox, val iv: ImageView, val name: TextView, val size: TextView, val play: Button)
+    class Holder(
+        val card: LinearLayout, val cb: CheckBox, val iv: ImageView,
+        val name: TextView, val meta: TextView, val folder: TextView, val play: TextView
+    )
 
-    private val ROOTS = listOf(
+    private val cPrimary = Color.parseColor("#6D28D9")
+    private val cBg = Color.parseColor("#F4F2FA")
+    private val cText = Color.parseColor("#1F1B2E")
+    private val cSub = Color.parseColor("#6B6880")
+    private val cSel = Color.parseColor("#EDE9FE")
+
+    private val roots = listOf(
         "/storage/emulated/0/Android/data/com.zhiliaoapp.musically",
         "/storage/emulated/0/Android/data/com.ss.android.ugc.trill",
         "/storage/emulated/0/Android/data/com.zhiliaoapp.musically.go"
@@ -46,10 +63,18 @@ class MainActivity : Activity() {
     private val ui = Handler(Looper.getMainLooper())
     private val pool = Executors.newFixedThreadPool(3)
     private val thumbs = LruCache<String, Bitmap>(80)
-    private lateinit var status: TextView
+    private val dateFmt = SimpleDateFormat("dd MMM yyyy, HH:mm", Locale.getDefault())
+
+    private lateinit var scanBtn: Button
     private lateinit var saveBtn: Button
+    private lateinit var clearBtn: Button
+    private lateinit var statusTitle: TextView
+    private lateinit var statusSub: TextView
+    private lateinit var progress: ProgressBar
     private lateinit var adapter: BaseAdapter
+
     @Volatile private var busy = false
+    @Volatile private var scanning = false
     @Volatile private var svc: IFileService? = null
     private var pending: (() -> Unit)? = null
 
@@ -57,7 +82,7 @@ class MainActivity : Activity() {
         val a = pending
         pending = null
         if (result == PackageManager.PERMISSION_GRANTED && a != null) withShizuku(a)
-        else toast("Shizuku की अनुमति नहीं मिली")
+        else toast("Shizuku permission was not granted")
     }
 
     private val conn = object : ServiceConnection {
@@ -70,37 +95,114 @@ class MainActivity : Activity() {
         override fun onServiceDisconnected(n: ComponentName?) { svc = null }
     }
 
+    // ---------- UI helpers ----------
     private fun dp(x: Int) = (x * resources.displayMetrics.density).toInt()
     private fun toast(t: String) = Toast.makeText(this, t, Toast.LENGTH_LONG).show()
 
+    private fun shape(color: Int, r: Int, stroke: Int = 0, strokeColor: Int = 0) = GradientDrawable().apply {
+        setColor(color)
+        cornerRadius = dp(r).toFloat()
+        if (stroke > 0) setStroke(dp(stroke), strokeColor)
+    }
+
+    private fun tv(t: String, sp: Float, color: Int, bold: Boolean = false) = TextView(this).apply {
+        text = t; textSize = sp; setTextColor(color)
+        if (bold) typeface = Typeface.DEFAULT_BOLD
+    }
+
+    private fun styleBtn(b: Button, primary: Boolean) {
+        b.isAllCaps = false
+        b.typeface = Typeface.DEFAULT_BOLD
+        b.textSize = 14f
+        b.stateListAnimator = null
+        if (primary) {
+            b.background = shape(cPrimary, 12)
+            b.setTextColor(Color.WHITE)
+        } else {
+            b.background = shape(Color.WHITE, 12, 1, Color.parseColor("#CBC3E3"))
+            b.setTextColor(cPrimary)
+        }
+    }
+
+    private fun setStatus(t: String, s: String) { statusTitle.text = t; statusSub.text = s }
+
+    private fun showProgress(on: Boolean, max: Int = 0, value: Int = 0) {
+        if (!on) { progress.visibility = View.GONE; return }
+        progress.visibility = View.VISIBLE
+        if (max == 0) progress.isIndeterminate = true else {
+            progress.isIndeterminate = false
+            progress.max = max
+            progress.progress = value
+        }
+    }
+
+    private fun applySel(h: Holder, on: Boolean) {
+        h.card.background = if (on) shape(cSel, 14, 2, cPrimary)
+        else shape(Color.WHITE, 14, 1, Color.parseColor("#E5E1F2"))
+    }
+
     override fun onCreate(b: Bundle?) {
         super.onCreate(b)
+        window.statusBarColor = cPrimary
         Shizuku.addRequestPermissionResultListener(permListener)
 
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.WHITE)
-            setPadding(dp(12), dp(36), dp(12), dp(8))
-        }
-        root.addView(TextView(this).apply {
-            text = "Video Saver"; textSize = 22f; setTextColor(Color.parseColor("#7C3AED"))
-        })
-        fun btn(t: String, c: () -> Unit) = Button(this).apply {
-            text = t; textSize = 12f; isAllCaps = false
-            setOnClickListener { c() }
-            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-        }
-        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        row.addView(btn("Shizuku से\nस्कैन करें") { withShizuku { scanShizuku() } })
-        row.addView(btn("फ़ोल्डर\nचुनें") { pickFolder() })
-        row.addView(btn("जाँच") { withShizuku { showInfo() } })
-        root.addView(row)
-        status = TextView(this).apply {
-            text = "Shizuku चालू करके \"Shizuku से स्कैन करें\" दबाएँ"
-            setPadding(0, dp(6), 0, dp(6))
-        }
-        root.addView(status)
+        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(cBg) }
 
+        // Header
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(cPrimary)
+            setPadding(dp(20), dp(16), dp(20), dp(18))
+            elevation = dp(4).toFloat()
+        }
+        header.addView(tv("Video Saver", 22f, Color.WHITE, true))
+        header.addView(tv("Find and save your TikTok videos", 13f, Color.parseColor("#DDD6FE")))
+        root.addView(header)
+
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), dp(12), dp(12), 0)
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
+        }
+
+        // Action buttons
+        val actions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        fun actionBtn(t: String, primary: Boolean, w: Float, c: () -> Unit) = Button(this).apply {
+            text = t
+            styleBtn(this, primary)
+            setOnClickListener { c() }
+            layoutParams = LinearLayout.LayoutParams(0, dp(48), w).apply { setMargins(dp(3), 0, dp(3), 0) }
+        }
+        scanBtn = actionBtn("Scan Phone", true, 1.3f) { onScanClicked() }
+        actions.addView(scanBtn)
+        actions.addView(actionBtn("Choose Folder", false, 1f) { pickFolder() })
+        actions.addView(actionBtn("Diagnostics", false, 1f) { withShizuku { showInfo() } })
+        content.addView(actions)
+
+        // Status card
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = shape(Color.WHITE, 16, 1, Color.parseColor("#E5E1F2"))
+            setPadding(dp(16), dp(14), dp(16), dp(14))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(12); bottomMargin = dp(8); leftMargin = dp(3); rightMargin = dp(3) }
+        }
+        statusTitle = tv("Ready", 16f, cText, true)
+        statusSub = tv("Tap “Scan Phone” to search your whole device for TikTok videos.", 13f, cSub)
+        statusSub.setPadding(0, dp(2), 0, 0)
+        progress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            isIndeterminate = true
+            visibility = View.GONE
+            progressTintList = ColorStateList.valueOf(cPrimary)
+            indeterminateTintList = ColorStateList.valueOf(cPrimary)
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                .apply { topMargin = dp(10) }
+        }
+        card.addView(statusTitle); card.addView(statusSub); card.addView(progress)
+        content.addView(card)
+
+        // List
         adapter = object : BaseAdapter() {
             override fun getCount() = videos.size
             override fun getItem(p: Int) = videos[p]
@@ -110,41 +212,61 @@ class MainActivity : Activity() {
                 val h: Holder
                 val view: View
                 if (cv == null) {
-                    val cb = CheckBox(this@MainActivity)
+                    val cb = CheckBox(this@MainActivity).apply { buttonTintList = ColorStateList.valueOf(cPrimary) }
                     val iv = ImageView(this@MainActivity).apply {
                         scaleType = ImageView.ScaleType.CENTER_CROP
-                        setBackgroundColor(Color.LTGRAY)
-                        layoutParams = LinearLayout.LayoutParams(dp(68), dp(90)).apply { setMargins(dp(4), dp(4), dp(8), dp(4)) }
+                        background = shape(Color.parseColor("#DDD6FE"), 10)
+                        outlineProvider = ViewOutlineProvider.BACKGROUND
+                        clipToOutline = true
+                        layoutParams = LinearLayout.LayoutParams(dp(68), dp(90)).apply { setMargins(dp(2), 0, dp(12), 0) }
                     }
-                    val name = TextView(this@MainActivity).apply { setTextColor(Color.BLACK); maxLines = 1 }
-                    val size = TextView(this@MainActivity)
+                    val name = tv("", 14f, cText, true).apply {
+                        maxLines = 1; ellipsize = TextUtils.TruncateAt.MIDDLE
+                    }
+                    val meta = tv("", 12f, cSub)
+                    val folder = tv("", 11f, Color.parseColor("#9B97B0")).apply {
+                        maxLines = 1; ellipsize = TextUtils.TruncateAt.END
+                    }
                     val col = LinearLayout(this@MainActivity).apply {
                         orientation = LinearLayout.VERTICAL
                         layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-                        addView(name); addView(size)
+                        addView(name); addView(meta); addView(folder)
                     }
-                    val play = Button(this@MainActivity).apply { text = "▶"; minWidth = 0; minimumWidth = dp(48) }
-                    val r = LinearLayout(this@MainActivity).apply {
+                    val play = tv("▶", 14f, Color.WHITE, true).apply {
+                        gravity = Gravity.CENTER
+                        background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(cPrimary) }
+                        layoutParams = LinearLayout.LayoutParams(dp(40), dp(40)).apply { leftMargin = dp(8) }
+                    }
+                    val inner = LinearLayout(this@MainActivity).apply {
                         orientation = LinearLayout.HORIZONTAL
                         gravity = Gravity.CENTER_VERTICAL
+                        setPadding(dp(8), dp(8), dp(10), dp(8))
                         addView(cb); addView(iv); addView(col); addView(play)
                     }
-                    h = Holder(cb, iv, name, size, play)
-                    r.tag = h
-                    view = r
+                    val outer = FrameLayout(this@MainActivity).apply {
+                        setPadding(dp(3), dp(4), dp(3), dp(4))
+                        addView(inner, FrameLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+                    }
+                    h = Holder(inner, cb, iv, name, meta, folder, play)
+                    outer.tag = h
+                    view = outer
                 } else {
                     view = cv
                     h = cv.tag as Holder
                 }
                 h.name.text = v.name
-                h.size.text = String.format("%.1f MB", v.size / 1048576.0)
+                h.meta.text = String.format(Locale.US, "%.1f MB  ·  %s", v.size / 1048576.0, dateFmt.format(Date(v.modified)))
+                h.folder.text = v.path?.substringBeforeLast('/')?.substringAfterLast('/') ?: "Selected folder"
                 h.cb.setOnCheckedChangeListener(null)
                 h.cb.isChecked = selected.contains(v.key)
+                applySel(h, h.cb.isChecked)
                 h.cb.setOnCheckedChangeListener { _, on ->
                     if (on) selected.add(v.key) else selected.remove(v.key)
+                    applySel(h, on)
                     refreshSave()
                 }
-                view.setOnClickListener { h.cb.toggle() }
+                h.card.setOnClickListener { h.cb.toggle() }
                 h.play.setOnClickListener { play(v) }
                 h.iv.tag = v.key
                 val c = thumbs.get(v.key)
@@ -161,15 +283,48 @@ class MainActivity : Activity() {
                 return view
             }
         }
-        root.addView(ListView(this).apply {
+        val list = ListView(this).apply {
             adapter = this@MainActivity.adapter
-            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
-        })
-        saveBtn = Button(this).apply {
-            text = "गैलरी में सेव करें (0)"; isEnabled = false
-            setOnClickListener { saveSelected() }
+            divider = null
+            dividerHeight = 0
+            selector = android.graphics.drawable.ColorDrawable(Color.TRANSPARENT)
         }
-        root.addView(saveBtn)
+        val empty = tv("No videos yet\n\nTap “Scan Phone” to search your device for TikTok videos.", 14f, cSub).apply {
+            gravity = Gravity.CENTER
+            setPadding(dp(32), dp(32), dp(32), dp(32))
+        }
+        val listWrap = FrameLayout(this).apply {
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
+            addView(list, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+            addView(empty, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        }
+        list.emptyView = empty
+        content.addView(listWrap)
+        root.addView(content)
+
+        // Bottom bar
+        val bar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setBackgroundColor(Color.WHITE)
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            elevation = dp(8).toFloat()
+        }
+        clearBtn = Button(this).apply {
+            text = "Clear"
+            styleBtn(this, false)
+            setOnClickListener { selected.clear(); adapter.notifyDataSetChanged(); refreshSave() }
+            layoutParams = LinearLayout.LayoutParams(0, dp(48), 1f).apply { rightMargin = dp(6) }
+        }
+        saveBtn = Button(this).apply {
+            text = "Save to Gallery (0)"
+            styleBtn(this, true)
+            isEnabled = false
+            alpha = 0.45f
+            setOnClickListener { saveSelected() }
+            layoutParams = LinearLayout.LayoutParams(0, dp(48), 2.2f)
+        }
+        bar.addView(clearBtn); bar.addView(saveBtn)
+        root.addView(bar)
         setContentView(root)
     }
 
@@ -182,7 +337,7 @@ class MainActivity : Activity() {
     private fun withShizuku(action: () -> Unit) {
         try {
             if (!Shizuku.pingBinder()) {
-                toast("Shizuku चालू नहीं है। Shizuku ऐप खोलकर Start दबाएँ, फिर वापस आएँ।")
+                toast("Shizuku is not running. Open Shizuku, tap Start, then come back.")
                 packageManager.getLaunchIntentForPackage("moe.shizuku.privileged.api")?.let { startActivity(it) }
                 return
             }
@@ -194,60 +349,89 @@ class MainActivity : Activity() {
             if (svc != null) { action(); return }
             pending = action
             val args = Shizuku.UserServiceArgs(ComponentName(packageName, FileService::class.java.name))
-                .processNameSuffix("fs").daemon(false).version(1)
+                .processNameSuffix("fs").daemon(false).version(3)
             Shizuku.bindUserService(args, conn)
         } catch (e: Throwable) {
-            toast("Shizuku एरर: ${e.message}")
+            toast("Shizuku error: ${e.message}")
         }
+    }
+
+    private fun onScanClicked() {
+        if (scanning) {
+            scanBtn.text = "Stopping…"
+            pool.execute { try { svc?.cancel() } catch (e: Exception) { } }
+        } else withShizuku { scanPhone() }
     }
 
     private fun resetList() {
         videos.clear(); selected.clear(); adapter.notifyDataSetChanged(); refreshSave()
     }
 
-    private fun scanShizuku() {
+    private fun scanPhone() {
         val s = svc ?: return
         if (busy) return
         busy = true
+        scanning = true
         resetList()
-        status.text = "Shizuku से स्कैन हो रहा है..."
+        scanBtn.text = "Stop Scan"
+        setStatus("Scanning your phone…", "Starting…")
+        showProgress(true)
+        pollProgress(s)
         Thread {
             val found = ArrayList<Vid>()
-            var diag = ""
+            var report = ""
             try {
-                for (r in ROOTS) {
-                    for (line in s.scan(r)) {
-                        val p = line.split("\t")
-                        if (p.size == 3) found.add(Vid(p[0], File(p[0]).name, p[1].toLong(), p[2].toLong(), null, p[0]))
-                    }
+                for (line in s.scanAll()) {
+                    val p = line.split("\t")
+                    if (p.size == 3) found.add(Vid(p[0], File(p[0]).name, p[1].toLong(), p[2].toLong(), null, p[0]))
                 }
-                if (found.isEmpty()) for (r in ROOTS) diag += s.info(r)
-            } catch (e: Exception) { diag = "एरर: ${e.message}" }
-            finishScan(found, diag)
+                if (found.isEmpty()) for (r in roots) report += s.info(r)
+            } catch (e: Exception) { report = "Error: ${e.message}" }
+            scanning = false
+            finishScan(found, report)
         }.start()
+    }
+
+    private fun pollProgress(s: IFileService) {
+        if (!scanning) return
+        pool.execute {
+            try {
+                val p = s.progress().split("|")
+                if (p.size == 2) ui.post {
+                    if (scanning) setStatus(
+                        "Scanning your phone…",
+                        String.format(Locale.US, "%,d files checked  ·  %,d TikTok videos found", p[0].toInt(), p[1].toInt())
+                    )
+                }
+            } catch (e: Exception) { }
+        }
+        ui.postDelayed({ pollProgress(s) }, 500)
     }
 
     private fun showInfo() {
         val s = svc ?: return
-        status.text = "जाँच हो रही है..."
+        setStatus("Running diagnostics…", "Checking TikTok folders")
+        showProgress(true)
         Thread {
             var t = ""
-            try { for (r in ROOTS) t += s.info(r) } catch (e: Exception) { t = "एरर: ${e.message}" }
+            try { for (r in roots) t += s.info(r) } catch (e: Exception) { t = "Error: ${e.message}" }
             ui.post {
-                status.text = "जाँच पूरी"
-                AlertDialog.Builder(this).setTitle("फ़ोल्डर जाँच").setMessage(t).setPositiveButton("ठीक है", null).show()
+                showProgress(false)
+                setStatus("Diagnostics complete", "See the report for details.")
+                AlertDialog.Builder(this).setTitle("TikTok folder report").setMessage(t)
+                    .setPositiveButton("Close", null).show()
             }
         }.start()
     }
 
-    // ---------- SAF (वैकल्पिक) ----------
+    // ---------- Manual folder (fallback) ----------
     private fun pickFolder() {
         val i = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE)
         i.putExtra(
             DocumentsContract.EXTRA_INITIAL_URI,
             Uri.parse("content://com.android.externalstorage.documents/document/primary%3AAndroid%2Fdata%2Fcom.zhiliaoapp.musically")
         )
-        try { startActivityForResult(i, 1) } catch (e: Exception) { toast("फ़ोल्डर पिकर नहीं खुला") }
+        try { startActivityForResult(i, 1) } catch (e: Exception) { toast("Could not open the folder picker") }
     }
 
     override fun onActivityResult(req: Int, res: Int, data: Intent?) {
@@ -260,7 +444,8 @@ class MainActivity : Activity() {
         if (busy) return
         busy = true
         resetList()
-        status.text = "स्कैन हो रहा है..."
+        setStatus("Scanning folder…", "Looking for videos")
+        showProgress(true)
         Thread {
             val found = ArrayList<Vid>()
             try {
@@ -288,23 +473,29 @@ class MainActivity : Activity() {
         } ?: false
     } catch (e: Exception) { false }
 
-    private fun finishScan(found: ArrayList<Vid>, diag: String) {
+    private fun finishScan(found: ArrayList<Vid>, report: String) {
         found.sortByDescending { it.modified }
         ui.post {
             videos.addAll(found)
             busy = false
+            scanning = false
+            scanBtn.text = "Scan Phone"
+            showProgress(false)
             adapter.notifyDataSetChanged()
             refreshSave()
             if (found.isEmpty()) {
-                status.text = "कोई वीडियो नहीं मिला"
-                if (diag.isNotEmpty())
-                    AlertDialog.Builder(this).setTitle("कोई वीडियो नहीं मिला").setMessage(diag)
-                        .setPositiveButton("ठीक है", null).show()
-            } else status.text = "${found.size} वीडियो मिले। जो पसंद हो उसे चुनें।"
+                setStatus("No videos found", "Open Diagnostics to see what TikTok left on this device.")
+                if (report.isNotEmpty())
+                    AlertDialog.Builder(this).setTitle("No videos found").setMessage(report)
+                        .setPositiveButton("Close", null).show()
+            } else setStatus(
+                "Found ${found.size} video" + (if (found.size == 1) "" else "s"),
+                "Tap videos to select them, then save to your gallery."
+            )
         }
     }
 
-    // ---------- फ़ाइल पढ़ना, थंबनेल, प्ले, सेव ----------
+    // ---------- File access, thumbnails, playback, saving ----------
     private fun openStream(v: Vid): InputStream? =
         if (v.uri != null) contentResolver.openInputStream(v.uri)
         else svc?.open(v.path)?.let { ParcelFileDescriptor.AutoCloseInputStream(it) }
@@ -319,11 +510,11 @@ class MainActivity : Activity() {
         val bm = r.getFrameAtTime(1_000_000, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
         r.release()
         pfd?.close()
-        bm?.let { Bitmap.createScaledBitmap(it, 90, 120, true) }
+        bm?.let { Bitmap.createScaledBitmap(it, 136, 180, true) }
     } catch (e: Exception) { null }
 
     private fun play(v: Vid) {
-        toast("लोड हो रहा है...")
+        toast("Loading video…")
         Thread {
             var path: String? = null
             if (v.uri == null) {
@@ -334,7 +525,7 @@ class MainActivity : Activity() {
                 } catch (e: Exception) { }
             }
             ui.post {
-                if (v.uri == null && path == null) { toast("वीडियो नहीं खुला"); return@post }
+                if (v.uri == null && path == null) { toast("Could not open this video"); return@post }
                 val vv = VideoView(this)
                 val mc = MediaController(this)
                 mc.setAnchorView(vv)
@@ -351,8 +542,10 @@ class MainActivity : Activity() {
     }
 
     private fun refreshSave() {
-        saveBtn.text = "गैलरी में सेव करें (${selected.size})"
-        saveBtn.isEnabled = selected.isNotEmpty() && !busy
+        saveBtn.text = "Save to Gallery (${selected.size})"
+        val on = selected.isNotEmpty() && !busy
+        saveBtn.isEnabled = on
+        saveBtn.alpha = if (on) 1f else 0.45f
     }
 
     private fun saveSelected() {
@@ -360,18 +553,23 @@ class MainActivity : Activity() {
         busy = true
         refreshSave()
         val todo = videos.filter { selected.contains(it.key) }
+        showProgress(true, todo.size, 0)
         Thread {
             var ok = 0
             todo.forEachIndexed { i, v ->
-                ui.post { status.text = "सेव हो रहा है ${i + 1}/${todo.size}..." }
+                ui.post {
+                    setStatus("Saving to gallery…", "${i + 1} of ${todo.size}")
+                    showProgress(true, todo.size, i)
+                }
                 if (saveToGallery(v)) ok++
             }
             ui.post {
                 busy = false
                 selected.clear()
+                showProgress(false)
                 adapter.notifyDataSetChanged()
                 refreshSave()
-                status.text = "$ok/${todo.size} वीडियो गैलरी में सेव हुए (Movies/Video Saver)"
+                setStatus("Saved $ok of ${todo.size}", "Find them in your gallery under Movies/Video Saver.")
             }
         }.start()
     }
